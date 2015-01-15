@@ -21,69 +21,121 @@ function outer(f, x, y)
   return M
 end
 
-function krig(kern, X, Y)
+function pseudo_inv(M, eps)
+  local u,s,v = torch.svd(M, 'S')
+  for i=1,s:size(1) do
+    if torch.abs(s[i]) > eps then
+      s[i] = 1/s[i]
+    else
+      s[i] = 0
+    end
+  end
+
+  return v*torch.diag(s)*u:t()
+end
+
+function gpmi_gain(mu, sigma, alpha, gamma)
+  return torch.sqrt(alpha) * (torch.sqrt(sigma^2 + gamma) - torch.sqrt(gamma))
+end
+
+function krig(kern, X, Y, nu)
+  if nu == nil then nu = 1e-3 end
+
   assert(X:dim() == 1)
   assert(Y:dim() == 1)
 
   assert(X:isSameSizeAs(Y))
 
-  local sig22  = outer(kern, X, X)
-  local sig22i = torch.inverse(sig22)
+  if X:size(1) == 0 then
+    return 0, kern(0, 0)
+  end
 
-  -- local u,s,v  = torch.svd(sig22)
-  -- for i=1,s:size(1) do
-  --   if s[i] > 1e-9 then
-  --     s[i] = 1/s[i]
-  --   else
-  --     s[i] = 0
-  --   end
-  -- end
-
-  -- local sig22i = v*torch.diag(s)*u:t()
+  local sig22  = outer(kern, X, X) + torch.eye(X:size(1))*nu
+  --local sig22i = torch.inverse(sig22)
+  local sig22i = pseudo_inv(sig22, 1e-6)
 
   return function(p)
     local Xp = torch.Tensor({p})
     local sig11 = outer(kern, Xp, Xp)
     local sig12 = outer(kern, Xp, X)
     local sig21 = sig12:t()
-    local mu  = sig12*(sig22i*Y)
-    local var = sig11 - sig12*(sig22i*sig21)
+    local mu    = sig12*(sig22i*Y)
+    local var   = sig11 - sig12*(sig22i*sig21)
 
     return mu[1], var[{1, 1}]
   end
 end
 
--- x = torch.linspace(0, 5)
--- y = x:clone():apply(function(x) return sqexp(1, 0, x) end)
--- gnuplot.plot(x, y)
 
-local X = torch.Tensor({1, 2.5, 4})
-local Y = torch.Tensor({-1, 1, -1})
+-- local X = torch.Tensor({0.1, 0.5, 0.9})
+-- local Y = torch.Tensor({-1, 1, -1})
 
-local function kern(a, b)
-  return sqexp(1.0, a, b)
+function krig_plot(X, Y, obj, gamma)
+  local function kern(a, b)
+    return sqexp(10e-3, a, b)
+  end
+
+  local f = krig(kern, X, Y, 0.1)
+
+  local x  = torch.linspace(0, 1)
+  local y  = torch.Tensor(x:size())
+  local g  = torch.Tensor(x:size())
+  local s  = torch.Tensor(x:size())
+  local o  = torch.Tensor(x:size())
+  local ym = torch.Tensor(x:size())
+  local yp = torch.Tensor(x:size())
+
+  for i=1,x:size(1) do
+    local delta = 10e-9
+    local alpha = torch.log(2/delta)
+
+    local mu, var = f(x[i])
+    local std = torch.sqrt(var)
+    o[i]  = obj(x[i])
+    y[i]  = mu
+    s[i]  = std
+    -- g[i]  = mu + gpmi_gain(mu, std, alpha, gamma)
+    g[i]  = std
+    ym[i] = mu - std
+    yp[i] = mu + std
+  end
+
+  local max_val, max_pos = g:max(1)
+  local max_idx = max_pos[1]
+  local arg_max = x[max_idx]
+  local arg_max_std = s[max_idx]
+
+  xmax = torch.Tensor({{x[max_idx], g[max_idx]}})
+
+  gnuplot.plot(
+    {x, ym, 'lines  lt 0'},
+    {x, yp, 'lines  lt 0'},
+    {x, y,  'lines  lt 1'},
+    {x, g,  'lines  lt 2'},
+    {X, Y,  'points lt 3'},
+    {x, o,  'lines  lt 4'},
+    {xmax,  'points lt 8 ps 3'})
+
+  return arg_max, y[max_idx], s[max_idx]
 end
 
-local f = krig(kern, X, Y)
+-- X = torch.linspace(0.1, 0.9, 5)
+-- Y = torch.randn(X:size())
+-- gamma = 0
 
-x  = torch.linspace(0, 5)
-y  = torch.Tensor(x:size(1)):zero()
-ym = torch.Tensor(x:size(1)):zero()
-yp = torch.Tensor(x:size(1)):zero()
-for i=1,x:size(1) do
-  local mu, var = f(x[i])
-  local std = torch.sqrt(var)
-  y[i]  = mu
-  ym[i] = mu - std
-  yp[i] = mu + std
+function obj(x)
+  return torch.sin(10*x)*torch.exp(x)
 end
 
-gnuplot.plot(
-  {x, ym, 'lines lt 0'},
-  {x, yp, 'lines lt 0'},
-  {x, y,  'lines lt 1'},
-  {X, Y, 'points lt 3'})
+X = torch.Tensor({0.5})
+Y = torch.Tensor({obj(0.5)})
+gamma = 0
 
--- gnuplot.plot(x, y)
--- gnuplot.imagesc(xx)
--- gnuplot.plot(xx)
+function krig_cycle()
+  local x, mu, std = krig_plot(X, Y, obj, gamma)
+
+  gamma = gamma + std^2
+  local y = obj(x) + torch.randn(1)[1]*0.1
+  X = X:cat(torch.Tensor({x}))
+  Y = Y:cat(torch.Tensor({y}))
+end
