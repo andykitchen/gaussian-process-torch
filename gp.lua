@@ -34,8 +34,10 @@ function pseudo_inv(M, eps)
   return v*torch.diag(s)*u:t()
 end
 
-function gpmi_gain(mu, sigma, alpha, gamma)
-  return torch.sqrt(alpha) * (torch.sqrt(sigma^2 + gamma) - torch.sqrt(gamma))
+function gain(mu, sigma, ts)
+  local b = 5.9
+  local t = (ts - mu) / sigma
+  return sigma*(torch.log(1 + b^-t)/torch.log(b))
 end
 
 function krig(kern, X, Y, nu)
@@ -72,7 +74,7 @@ end
 
 function krig_plot(X, Y, obj, gamma)
   local function kern(a, b)
-    return sqexp(10e-3, a, b)
+    return sqexp(10e-4, a, b)
   end
 
   local f = krig(kern, X, Y, 0.1)
@@ -94,8 +96,8 @@ function krig_plot(X, Y, obj, gamma)
     o[i]  = obj(x[i])
     y[i]  = mu
     s[i]  = std
-    -- g[i]  = mu + gpmi_gain(mu, std, alpha, gamma)
-    g[i]  = std
+    g[i]  = gain(mu, std, Y:max())
+    -- g[i]  = std
     ym[i] = mu - std
     yp[i] = mu + std
   end
@@ -105,6 +107,7 @@ function krig_plot(X, Y, obj, gamma)
   local arg_max = x[max_idx]
   local arg_max_std = s[max_idx]
 
+  g = (g-g:mean())/g:std()/5
   xmax = torch.Tensor({{x[max_idx], g[max_idx]}})
 
   gnuplot.plot(
@@ -124,7 +127,8 @@ end
 -- gamma = 0
 
 function obj(x)
-  return torch.sin(10*x)*torch.exp(x)
+  return torch.sin(10*math.pi*x)*torch.exp(x/10)
+  --return -(x - 0.5)^2
 end
 
 X = torch.Tensor({0.5})
