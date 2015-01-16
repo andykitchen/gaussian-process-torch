@@ -1,7 +1,22 @@
 require 'gnuplot'
+require 'sys'
 
 function sqexp(l, a, b)
   return torch.exp(-torch.abs(b - a)^2 / (2*l))
+end
+
+function oruh(l, a, b)
+  return torch.exp(-torch.abs(b - a) / l)
+end
+
+function matern32(l, a, b)
+  local d = torch.abs(b - a)
+  return torch.exp(-torch.sqrt(3)*d / l) * (l + torch.sqrt(3)*d) / l
+end
+
+function matern52(l, a, b)
+  local d = torch.abs(b - a)
+  return torch.exp(-torch.sqrt(5)*d / l) * (3*l^2 + 3*torch.sqrt(5)*l*d + 5*d^2) / (3*l^2)
 end
 
 function outer(f, x, y)
@@ -42,11 +57,16 @@ end
 
 function krig(kern, X, Y, nu)
   if nu == nil then nu = 1e-3 end
+  assert(X:isSameSizeAs(Y))
+
+  if X:dim() == 0 then
+    return function(p)
+      return 0, kern(0, 0)
+    end
+  end
 
   assert(X:dim() == 1)
   assert(Y:dim() == 1)
-
-  assert(X:isSameSizeAs(Y))
 
   if X:size(1) == 0 then
     return 0, kern(0, 0)
@@ -72,14 +92,17 @@ end
 -- local X = torch.Tensor({0.1, 0.5, 0.9})
 -- local Y = torch.Tensor({-1, 1, -1})
 
+noise = 1e-3
+scale = 1e-2
+
 function krig_plot(X, Y, obj, gamma)
   local function kern(a, b)
-    return sqexp(10e-4, a, b)
+    return sqexp(scale, a, b)
   end
 
-  local f = krig(kern, X, Y, 0.1)
+  local f = krig(kern, X, Y, noise)
 
-  local x  = torch.linspace(0, 1)
+  local x  = torch.linspace(0, 1, 500)
   local y  = torch.Tensor(x:size())
   local g  = torch.Tensor(x:size())
   local s  = torch.Tensor(x:size())
@@ -107,39 +130,70 @@ function krig_plot(X, Y, obj, gamma)
   local arg_max = x[max_idx]
   local arg_max_std = s[max_idx]
 
-  g = (g-g:mean())/g:std()/5
+  --g = (g-g:mean())/g:std()/5
   xmax = torch.Tensor({{x[max_idx], g[max_idx]}})
 
   gnuplot.plot(
     {x, ym, 'lines  lt 0'},
     {x, yp, 'lines  lt 0'},
     {x, y,  'lines  lt 1'},
-    {x, g,  'lines  lt 2'},
+    --{x, g,  'lines  lt 2'},
     {X, Y,  'points lt 3'},
     {x, o,  'lines  lt 4'},
     {xmax,  'points lt 8 ps 3'})
 
-  return arg_max, y[max_idx], s[max_idx]
+  return arg_max, y[max_idx], s[max_idx], max_val[1]
 end
-
--- X = torch.linspace(0.1, 0.9, 5)
--- Y = torch.randn(X:size())
--- gamma = 0
 
 function obj(x)
-  return torch.sin(10*math.pi*x)*torch.exp(x/10)
-  --return -(x - 0.5)^2
+  local s  = torch.sin(10*math.pi*x)*torch.exp(x)/5
+  local sf = torch.sin(50*math.pi*x)/10
+  local p = -(x - 0.5)^2/5
+  local e = x < 0.5 and (torch.exp((x - 0.5)*10)) or (torch.exp(-(x - 0.5)*10))
+  local l = x/2
+  local p2 = x * (-0.75*x+1)
+
+  return p2
 end
 
-X = torch.Tensor({0.5})
-Y = torch.Tensor({obj(0.5)})
-gamma = 0
+X = torch.Tensor({0})
+Y = torch.Tensor({obj(0)})
 
 function krig_cycle()
-  local x, mu, std = krig_plot(X, Y, obj, gamma)
-
-  gamma = gamma + std^2
-  local y = obj(x) + torch.randn(1)[1]*0.1
+  local x, mu, std, max_gain = krig_plot(X, Y, obj)
+  local y = obj(x) + torch.randn(1)[1]*noise
   X = X:cat(torch.Tensor({x}))
   Y = Y:cat(torch.Tensor({y}))
 end
+
+function krig_loop()
+  local running_max = -1000.0
+  local last_max_arg = nil
+  local last_max_gain = 1000.0
+
+  while last_max_gain > 0.05 do
+    local x, mu, std, max_gain = krig_plot(X, Y, obj)
+
+    -- Xmu = X:cat(torch.Tensor({x}))
+    -- Ymu = Y:cat(torch.Tensor({mu}))
+
+    -- local x2, mu2, std2 = krig_plot(Xmu, Ymu, obj)
+
+    local y = obj(x) + torch.randn(1)[1]*noise
+    X = X:cat(torch.Tensor({x}))
+    Y = Y:cat(torch.Tensor({y}))
+
+    -- local y2 = obj(x2) + torch.randn(1)[1]*noise
+    -- X = X:cat(torch.Tensor({x2}))
+    -- Y = Y:cat(torch.Tensor({y2}))
+
+    last_max_gain = max_gain
+    if y  > running_max then running_max = y;  last_max_arg = x end
+    -- if y2 > running_max then running_max = y2; last_max_arg = x2 end
+
+    print(last_max_arg, max_gain)
+
+    sys.sleep(0.5)
+  end
+end
+
