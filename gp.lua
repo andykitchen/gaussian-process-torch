@@ -2,38 +2,13 @@ require 'gnuplot'
 require 'sys'
 
 function sqexp(l, a, b)
-  return torch.exp(-torch.abs(b - a)^2 / (2*l))
+  local d = torch.dist(a, b)
+  return torch.exp(-d^2 / (2*l))
 end
 
-function oruh(l, a, b)
-  return torch.exp(-torch.abs(b - a) / l)
-end
-
-function matern32(l, a, b)
-  local d = torch.abs(b - a)
-  return torch.exp(-torch.sqrt(3)*d / l) * (l + torch.sqrt(3)*d) / l
-end
-
-function matern52(l, a, b)
-  local d = torch.abs(b - a)
-  return torch.exp(-torch.sqrt(5)*d / l) * (3*l^2 + 3*torch.sqrt(5)*l*d + 5*d^2) / (3*l^2)
-end
-
-function outer(f, x, y)
-  assert(x:dim() == 1)
-  assert(y:dim() == 1)
-
-  local n = x:size(1)
-  local k = y:size(1)
-  local M = torch.Tensor(n, k)
-
-  for i=1,n do
-    for j=1,k do
-      M[{i, j}] = f(x[i], y[j])
-    end
-  end
-
-  return M
+function nexp(l, a, b)
+  local d = torch.dist(a, b)
+  return torch.exp(-d / l)
 end
 
 function pseudo_inv(M, eps)
@@ -49,15 +24,22 @@ function pseudo_inv(M, eps)
   return v*torch.diag(s)*u:t()
 end
 
-function gain(mu, sigma, ts)
-  local b = 5.9
-  local t = (ts - mu) / sigma
-  return sigma*(torch.log(1 + b^-t)/torch.log(b))
+function outer(f, x, y)
+  local n = x:size(1)
+  local k = y:size(1)
+  local M = torch.Tensor(n, k)
+
+  for i=1,n do
+    for j=1,k do
+      M[{i, j}] = f(x[i], y[j])
+    end
+  end
+
+  return M
 end
 
 function krig(kern, X, Y, nu)
   if nu == nil then nu = 1e-3 end
-  assert(X:isSameSizeAs(Y))
 
   if X:dim() == 0 then
     return function(p)
@@ -65,19 +47,18 @@ function krig(kern, X, Y, nu)
     end
   end
 
-  assert(X:dim() == 1)
+  assert(X:dim() == 2)
   assert(Y:dim() == 1)
-
-  if X:size(1) == 0 then
-    return 0, kern(0, 0)
-  end
+  assert(X:size(1) == Y:size(1))
 
   local sig22  = outer(kern, X, X) + torch.eye(X:size(1))*nu
   --local sig22i = torch.inverse(sig22)
   local sig22i = pseudo_inv(sig22, 1e-6)
 
   return function(p)
-    local Xp = torch.Tensor({p})
+    assert(p:dim() == 1)
+
+    local Xp    = p:reshape(1, p:size(1))
     local sig11 = outer(kern, Xp, Xp)
     local sig12 = outer(kern, Xp, X)
     local sig21 = sig12:t()
@@ -88,112 +69,122 @@ function krig(kern, X, Y, nu)
   end
 end
 
+function gaussian2(p)
+  local x = p[1]
+  local y = p[2]
 
--- local X = torch.Tensor({0.1, 0.5, 0.9})
--- local Y = torch.Tensor({-1, 1, -1})
+  local g1 = torch.exp(-((3.0*x+0.75)^2 + (3.0*y+0.75)^2))
+  local g2 = torch.exp(-((3.0*x-0.75)^2 + (3.0*y-0.75)^2))
 
-noise = 1e-3
-scale = 1e-2
+  return 0.6*g1 + 0.4*g2
+end
 
-function krig_plot(X, Y, obj, gamma)
-  local function kern(a, b)
-    return sqexp(scale, a, b)
-  end
+obj = gaussian2
+noise = 0.01
+smooth = 0.2
 
-  local f = krig(kern, X, Y, noise)
+function kern(a, b)
+  return nexp(smooth, a, b)
+end
 
-  local x  = torch.linspace(0, 1, 500)
-  local y  = torch.Tensor(x:size())
-  local g  = torch.Tensor(x:size())
-  local s  = torch.Tensor(x:size())
-  local o  = torch.Tensor(x:size())
-  local ym = torch.Tensor(x:size())
-  local yp = torch.Tensor(x:size())
+function gain(mu, sigma, ts)
+  local b = 5.9
+  local t = (ts - mu) / sigma
+  return sigma*(torch.log(1 + b^-t)/torch.log(b))
+end
+
+function plot(X, Y)
+  f = krig(kern, X, Y, noise)
+
+  x = torch.linspace(-1, 1, 32)
+  y = x
+
+  local max = Y:max()
+
+  z  = torch.Tensor(x:size(1), x:size(1))
+  zc = torch.Tensor(x:size(1), x:size(1))
+  g  = torch.Tensor(x:size(1), x:size(1))
+
+  local data = {'\n'}
 
   for i=1,x:size(1) do
-    local delta = 10e-9
-    local alpha = torch.log(2/delta)
-
-    local mu, var = f(x[i])
-    local std = torch.sqrt(var)
-    o[i]  = obj(x[i])
-    y[i]  = mu
-    s[i]  = std
-    g[i]  = gain(mu, std, Y:max())
-    -- g[i]  = std
-    ym[i] = mu - std
-    yp[i] = mu + std
+    for j=1,y:size(1) do
+      local p = torch.Tensor{x[i], y[j]}
+      local mu, sigma = f(p)
+      z[{i, j}]  = mu
+      zc[{i, j}] = sigma
+      g[{i, j}]  = gain(mu, sigma, max)
+    end
   end
 
-  local max_val, max_pos = g:max(1)
-  local max_idx = max_pos[1]
-  local arg_max = x[max_idx]
-  local arg_max_std = s[max_idx]
+  for i=1,x:size(1) do
+    for j=1,y:size(1) do
+      table.insert(data, string.format('%g %g %g %g\n', x[i], y[j], z[{i,j}], zc[{i,j}]))
+    end
+    table.insert(data, '\n')
+  end
+  table.insert(data, 'e\n')
 
-  --g = (g-g:mean())/g:std()/5
-  xmax = torch.Tensor({{x[max_idx], g[max_idx]}})
+  for i=1,X:size(1) do
+    local p = X[i]
+    table.insert(data, string.format('%g %g %g\n', p[1], p[2], Y[i]))
+  end
+  table.insert(data, 'e\n')
 
-  gnuplot.plot(
-    {x, ym, 'lines  lt 0'},
-    {x, yp, 'lines  lt 0'},
-    {x, y,  'lines  lt 1'},
-    --{x, g,  'lines  lt 2'},
-    {X, Y,  'points lt 3'},
-    {x, o,  'lines  lt 4'},
-    {xmax,  'points lt 8 ps 3'})
+  gnuplot.raw('set contour base')
+  gnuplot.raw('set cntrparam bspline')
+  gnuplot.raw('set cntrparam levels auto')
+  gnuplot.raw('unset hidden3d')
+  gnuplot.raw('set zrange  [-0.25:0.8]')
+  gnuplot.raw('set cbrange [0:1]')
+  -- gnuplot.raw('set palette')
+  gnuplot.raw('set palette rgb 30,31,32')
+  gnuplot.raw('splot "-" with lines palette, "-" with points lt 3 ps 4')
+  gnuplot.raw(table.concat(data))
 
-  return arg_max, y[max_idx], s[max_idx], max_val[1]
+  local cur_max = -1, max_i, max_j
+  for i=1,x:size(1) do
+    for j=1,y:size(1) do
+      local gij = g[{i, j}]
+      if gij > cur_max then
+        cur_max = gij
+        max_i = i
+        max_j = j
+      end
+    end
+  end
+
+  return torch.Tensor({x[max_i], y[max_j]})
 end
 
-function obj(x)
-  local s  = torch.sin(10*math.pi*x)*torch.exp(x)/5
-  local sf = torch.sin(50*math.pi*x)/10
-  local p = -(x - 0.5)^2/5
-  local e = x < 0.5 and (torch.exp((x - 0.5)*10)) or (torch.exp(-(x - 0.5)*10))
-  local l = x/2
-  local p2 = x * (-0.75*x+1)
+--X = torch.Tensor{{-2,-2}}
 
-  return p2
+X = torch.rand(1, 2)*2 - 1
+Y = torch.Tensor(X:size(1))
+for i=1,Y:size(1) do
+  Y[i] = obj(X[i])
 end
 
-X = torch.Tensor({0})
-Y = torch.Tensor({obj(0)})
-
-function krig_cycle()
-  local x, mu, std, max_gain = krig_plot(X, Y, obj)
-  local y = obj(x) + torch.randn(1)[1]*noise
-  X = X:cat(torch.Tensor({x}))
-  Y = Y:cat(torch.Tensor({y}))
+function cycle()
+  p = plot(X, Y)
+  X = X:cat(p:reshape(1,2),1)
+  y = obj(p) + torch.randn(1)[1]*noise
+  Y = Y:cat(torch.Tensor{y})
 end
 
-function krig_loop()
-  local running_max = -1000.0
-  local last_max_arg = nil
-  local last_max_gain = 1000.0
-
-  while last_max_gain > 0.05 do
-    local x, mu, std, max_gain = krig_plot(X, Y, obj)
-
-    -- Xmu = X:cat(torch.Tensor({x}))
-    -- Ymu = Y:cat(torch.Tensor({mu}))
-
-    -- local x2, mu2, std2 = krig_plot(Xmu, Ymu, obj)
-
-    local y = obj(x) + torch.randn(1)[1]*noise
-    X = X:cat(torch.Tensor({x}))
-    Y = Y:cat(torch.Tensor({y}))
-
-    -- local y2 = obj(x2) + torch.randn(1)[1]*noise
-    -- X = X:cat(torch.Tensor({x2}))
-    -- Y = Y:cat(torch.Tensor({y2}))
-
-    last_max_gain = max_gain
-    if y  > running_max then running_max = y;  last_max_arg = x end
-    -- if y2 > running_max then running_max = y2; last_max_arg = x2 end
-
-    print(last_max_arg, max_gain)
-
+function loop()
+  for i=1,16 do
+    cycle()
     sys.sleep(0.5)
   end
 end
 
+function tested()
+  gnuplot.plot({X, '+'})
+end
+
+-- o = torch.Tensor({0,0})
+-- x = torch.linspace(-1,1)
+-- --z = outer(function(x, y) return sqexp(0.2, o, torch.Tensor({x, y})) end, x, x)
+-- z = outer(function(x, y) return gaussian2(torch.Tensor({x, y})) end, x, x)
+-- gnuplot.splot(z)
